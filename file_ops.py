@@ -1,0 +1,402 @@
+# MB-Lab
+#
+# MB-Lab fork website : https://github.com/animate1978/MB-Lab
+#
+# ##### BEGIN GPL LICENSE BLOCK #####
+#
+#  This program is free software; you can redistribute it and/or
+#  modify it under the terms of the GNU General Public License
+#  as published by the Free Software Foundation; either version 3
+#  of the License, or (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program; if not, write to the Free Software Foundation,
+#  Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+#
+# ##### END GPL LICENSE BLOCK #####
+#
+# ManuelbastioniLAB - Copyright (C) 2015-2018 Manuel Bastioni
+
+import logging
+
+import os
+import json
+import array
+import time
+
+import mathutils
+import bpy
+
+from . import utils
+from .utils import get_object_parent
+
+logger = logging.getLogger(__name__)
+
+data_directory = "data"
+# Below is a trick. For unknown reason, get_configuration()
+# is invoked multiple times in some occasions like expressions tool
+# after finalization. That's why the tool is so long.
+# As the configuration need to be loaded a single time by session,
+# this variable was created.
+configuration_done = None
+root_directories = None
+
+def is_writeable(filepath):
+    try:
+        with open(filepath, 'w'):
+            return True
+    except IOError:
+        logger.warning("Writing permission denied for %s", filepath)
+    return False
+
+def get_root_directories():
+    global root_directories
+    if root_directories != None:
+        return root_directories
+    rd = []
+    fd = [".git", ".github", "__pycache__", "mb-lab_updater"]
+    addon_directory = os.path.dirname(os.path.realpath(__file__))
+    for root, dirs, files in os.walk(addon_directory):
+        if root == addon_directory:
+            rd = dirs
+            break
+    root_directories = []
+    for dir in rd:
+        if dir not in fd:
+            root_directories.append(
+                (dir,
+                "MB_Lab" if dir == "data" else dir,
+                dir))
+    return root_directories
+    
+def set_data_path(path):
+    global data_directory
+    global configuration_done
+    data_directory = path
+    configuration_done = None
+
+def get_data_path():
+    global data_directory
+    addon_directory = os.path.dirname(os.path.realpath(__file__))
+    root_dir = os.path.join(addon_directory, data_directory)
+    logger.info("Looking for the retarget data in the folder %s...", simple_path(root_dir))
+
+    if not os.path.isdir(root_dir):
+        logger.critical("Tools data not found. Please check your Blender addons directory.")
+        return None
+
+    return root_dir
+
+def get_configuration():
+    global configuration_done
+    # For a reason, after finalization, some functions use this
+    # but they don't need it. As a configuration doesn't change
+    # during a session, no need to recalculate it each time.
+    # what's why the variable below exists.
+    if configuration_done != None:
+        return configuration_done
+    data_path = get_data_path()
+    # Here something to change :
+    # Allow to load every file that ends with _config.json
+    if data_path:
+        configuration_done = {}
+        tmp = {}
+        for list_dir in os.listdir(data_path):
+            configuration_path = os.path.join(data_path, list_dir)
+            if os.path.isfile(configuration_path) and configuration_path.endswith("_config.json"):
+                tmp = load_json_data(configuration_path, "Characters definition")
+                for prop in tmp:
+                    if prop == 'data_directory':
+                        pass
+                    elif not prop in configuration_done:
+                        configuration_done[prop] = tmp[prop]
+                    elif prop == "templates_list" or prop == "character_list":
+                        configuration_done[prop] += tmp[prop]
+                    else:
+                        configuration_done[prop] = tmp[prop]
+        return configuration_done
+    logger.critical("Configuration database not found. Please check your Blender addons directory.")
+    return None
+
+def get_blendlibrary_path():
+    data_path = get_data_path()
+    if data_path:
+        return os.path.join(data_path, "humanoid_library.blend")
+
+    logger.critical("Models library not found. Please check your Blender addons directory.")
+    return None
+
+def save_blend_data(filename):
+    data_path = get_data_path()
+    if data_path:
+        return os.path.join(data_path, "humanoid_library.blend")
+
+    logger.critical("Models library not found. Please check your Blender addons directory.")
+    return None
+
+def simple_path(input_path, use_basename=True, max_len=50):
+    """
+    Return the last part of long paths
+    """
+    if use_basename:
+        return os.path.basename(input_path)
+
+    if len(input_path) > max_len:
+        return f"[Trunked]..{input_path[len(input_path)-max_len:]}"
+
+    return input_path
+
+def exists_database(lib_path):
+    result = False
+    if simple_path(lib_path) != "":
+        if os.path.isdir(lib_path):
+            if os.listdir(lib_path):
+                for database_file in os.listdir(lib_path):
+                    _, extension = os.path.splitext(database_file)
+                    if "json" in extension or "bvh" in extension:
+                        result = True
+                    else:
+                        logger.warning("Unknow file extension in %s", simple_path(lib_path))
+
+        else:
+            logger.warning("data path %s not found", simple_path(lib_path))
+    return result
+
+#Teto
+def save_json_data(json_path, char_data):
+    try:
+        with open(json_path, "w") as j_file:
+            json.dump(char_data, j_file)
+        j_file.close()
+    except IOError:
+        if simple_path(json_path) != "":
+            logger.warning("File can not be saved: %s", simple_path(json_path))
+    except Exception:
+        logger.warning("The data are not serializable: %s", simple_path(json_path))
+#End Teto
+
+def load_json_data(json_path, description=None):
+    try:
+        time1 = time.time()
+        with open(json_path, "r") as j_file:
+            j_database = json.load(j_file)
+            if not description:
+                logger.info("Json database %s loaded in %s secs",
+                            simple_path(json_path), time.time()-time1)
+            else:
+                logger.info("%s loaded from %s in %s secs",
+                            description, simple_path(json_path), time.time()-time1)
+            return j_database
+    except IOError:
+        if simple_path(json_path) != "":
+            logger.warning("File not found: %s", simple_path(json_path))
+    except json.JSONDecodeError:
+        logger.warning("Errors in json file: %s", simple_path(json_path))
+    return None
+
+def load_vertices_database(vertices_path):
+    vertices = []
+    verts = load_json_data(vertices_path, "Vertices data")
+    if verts:
+        for vert_co in verts:
+            vertices.append(mathutils.Vector(vert_co))
+    return vertices
+
+
+def set_verts_coords_from_file(obj, vertices_path):
+    new_vertices = load_vertices_database(vertices_path)
+    if obj:
+        if len(new_vertices) == len(obj.data.vertices):
+            for i, vert in enumerate(obj.data.vertices):
+                vert.co = new_vertices[i]
+
+
+def generate_items_list(folderpath, file_type="json", with_type = False):
+    items_list = []
+    if os.path.isdir(folderpath):
+        for database_file in os.listdir(folderpath):
+            the_item, extension = os.path.splitext(database_file)
+            if file_type in extension:
+                final_name = the_item if not with_type else database_file
+                if final_name not in items_list:
+                    the_descr = "Load and apply {0} from lab library".format(the_item)
+                    items_list.append((final_name, final_name, the_descr))
+        items_list.sort()
+    return items_list
+
+# A convenient way to not create the items list all the time
+items_dict = {}
+
+def get_items_list(folderpath, file_type="json", with_type=False, reset=False):
+    global items_dict
+    if folderpath in items_dict and not reset:
+        return items_dict[folderpath]
+    items_list = generate_items_list(folderpath, file_type, with_type)
+    if len(items_list) > 0:
+        items_dict[folderpath] = items_list
+    return items_list
+
+# Append humanoid objects
+
+def import_object_from_lib(lib_filepath, name, final_name=None, stop_import=True):
+    if name != "":
+        if stop_import:
+            logger.info("Appending object %s from %s", name, simple_path(lib_filepath))
+            if name in bpy.data.objects:
+                logger.warning("Object %s already in the scene. Import stopped", name)
+                return None
+
+            if final_name:
+                if final_name in bpy.data.objects:
+                    logger.warning("Object %s already in the scene. Import stopped", final_name)
+                    return None
+
+        append_object_from_library(lib_filepath, [name])
+        obj = get_object_by_name(name)
+        if obj:
+            logger.info("Object '%s' imported", name)
+            if final_name:
+                obj.name = final_name
+                logger.info("Object '%s' renamed as '%s'", name, final_name)
+            return obj
+
+        logger.warning("Object %s not found in library %s", name, simple_path(lib_filepath))
+    return None
+
+
+def append_object_from_library(lib_filepath, obj_names, suffix=None):
+
+    try:
+        with bpy.data.libraries.load(lib_filepath) as (data_from, data_to):
+            if suffix:
+                names_to_append = [name for name in data_from.objects if suffix in name]
+                data_to.objects = names_to_append
+            else:
+                names_to_append = obj_names
+                data_to.objects = [name for name in names_to_append if name in data_from.objects]
+    except OSError:
+        logger.critical("lib %s not found", lib_filepath)
+        return
+        
+    for obj in data_to.objects:
+        link_to_collection(obj)
+        obj_parent = utils.get_object_parent(obj)
+        if obj_parent:
+            link_to_collection(obj_parent)
+
+
+def append_mesh_from_library(lib_filepath, mesh_names, suffix=None):
+
+    try:
+        with bpy.data.libraries.load(lib_filepath) as (data_from, data_to):
+            if suffix:
+                names_to_append = [name for name in data_from.meshes if suffix in name]
+                data_to.meshes = names_to_append
+            else:
+                names_to_append = mesh_names
+                data_to.meshes = [name for name in names_to_append if name in data_from.meshes]
+    except OSError:
+        logger.critical("lib %s not found", lib_filepath)
+
+def read_object_names_from_library(lib_filepath):
+    try:
+        with bpy.data.libraries.load(lib_filepath) as (data_from, data_to):
+            for name in data_from.objects:
+                print("OBJ_LIB: ", name)
+    except OSError:
+        logger.critical("lib %s not found", lib_filepath)
+
+def link_to_collection(obj):
+    # sanity check
+    if obj.name not in bpy.data.objects:
+        logger.error("Cannot link obj %s because it's not in bpy.data.objects", obj.name)
+        return
+
+    collection_name = 'MB_LAB_Character'
+    c = bpy.data.collections.get(collection_name)
+    scene = bpy.context.scene
+    # collection is already created
+    if c is not None:
+        if obj.name not in c.objects:
+            c.objects.link(obj)
+        else:
+            logger.warning("The object %s is already linked to the scene", obj.name)
+    else:
+        # create the collection, link collection to scene and link obj to collection
+        c = bpy.data.collections.new(collection_name)
+        scene.collection.children.link(c)
+        c.objects.link(obj)
+
+def is_armature_linked(obj, armat):
+    if obj.type == 'MESH':
+        for modfr in obj.modifiers:
+            if modfr.type == 'ARMATURE' and modfr.object == armat:
+                return True
+    return False
+
+def get_object_by_name(name):
+    return bpy.data.objects.get(name)
+
+
+def select_object_by_name(name):
+    obj = get_object_by_name(name)
+    if obj:
+        obj.select_set(True)
+
+def get_newest_object(existing_obj_names):
+    for obj in bpy.data.objects:
+        name = obj.name
+        if name not in existing_obj_names:
+            return get_object_by_name(name)
+    return None
+
+
+def load_image(filepath):
+    if os.path.isfile(filepath):
+        logger.info("Loading image %s", os.path.basename(filepath))
+        img = bpy.data.images.load(filepath, check_existing=True)
+        img.reload()
+    else:
+        logger.info("Image %s not found", os.path.basename(filepath))
+
+def get_image(name):
+    if name:
+        if name in bpy.data.images:
+            # Some check for log
+            if bpy.data.images[name].source == "FILE":
+                if os.path.basename(bpy.data.images[name].filepath) != name:
+                    logger.warning("Image named %s is from file: %s",
+                                   name, os.path.basename(bpy.data.images[name].filepath))
+            return bpy.data.images[name]
+        logger.warning("Getting image failed. Image %s not found in bpy.data.images", name)
+        return None
+
+    logger.warning("Getting image failed. Image name is %s", name)
+    return None
+
+def save_image(name, filepath, fileformat='PNG'):
+    img = get_image(name)
+    scn = bpy.context.scene
+    if img:
+        current_format = scn.render.image_settings.file_format
+        scn.render.image_settings.file_format = fileformat
+        img.save_render(filepath)
+        scn.render.image_settings.file_format = current_format
+    else:
+        logger.warning(
+            "The image %s cannot be saved because it's not present in bpy.data.images.", name)
+
+
+def new_texture(name, image=None):
+    if name not in bpy.data.textures:
+        _new_texture = bpy.data.textures.new(name, type='IMAGE')
+    else:
+        _new_texture = bpy.data.textures[name]
+    if image:
+        _new_texture.image = image
+    return _new_texture
